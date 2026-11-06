@@ -1,0 +1,208 @@
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  pythonVersion: '3.12'
+
+
+stages:
+
+  # ============================================================
+  # IMPLEMENT
+  # ============================================================
+  - stage: Implement
+    displayName: 'Build'
+    jobs:
+      - job: Build
+        displayName: 'Build Python application'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          - script: |
+              python --version
+              python -m pip --version
+            displayName: 'Show Python information'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: 'Install dependencies'
+
+          # Python doesn't have a compilation step like C#,
+          # but compileall catches syntax errors.
+          - script: |
+              python -m compileall app.py test_app.py
+            displayName: 'Validate Python syntax'
+
+  # ============================================================
+  # TESTING
+  # ============================================================
+  - stage: Testing
+    displayName: 'Testing'
+    dependsOn: Implement
+    jobs:
+      - job: Tests
+        displayName: 'Run tests'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+              pip install pytest pytest-cov
+            displayName: 'Install test dependencies'
+
+          # ====================================================
+          # UNIT TESTS + COVERAGE
+          # ====================================================
+          - script: |
+              pytest \
+                test_app.py \
+                -v \
+                --junitxml="$(Agent.TempDirectory)/TestResults/test-results.xml" \
+                --cov=app \
+                --cov-report=term \
+                --cov-report=xml:"$(Agent.TempDirectory)/Coverage/coverage.xml"
+            displayName: 'Unit tests with coverage'
+
+          # ====================================================
+          # PUBLISH TEST RESULTS
+          # ====================================================
+          - task: PublishTestResults@2
+            displayName: 'Publish test results'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: '$(Agent.TempDirectory)/TestResults/*.xml'
+              failTaskOnFailedTests: true
+              testRunTitle: 'Python unit tests'
+
+          # ====================================================
+          # PUBLISH CODE COVERAGE
+          # ====================================================
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publish code coverage'
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(Agent.TempDirectory)/Coverage/coverage.xml'
+
+  # ============================================================
+  # SECURITY
+  # ============================================================
+  - stage: Security
+    displayName: 'Security'
+    dependsOn: Testing
+    jobs:
+      # ========================================================
+      # TRIVY VULNERABILITY SCAN
+      # ========================================================
+      - job: TrivyVulnerabilities
+        displayName: 'Trivy SCA'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          - script: |
+              trivy fs \
+                --scanners vuln \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Scan Python dependencies with Trivy'
+
+      # ========================================================
+      # TRIVY SECRET SCAN
+      # ========================================================
+      - job: TrivySecrets
+        displayName: 'Trivy Secrets Scanning'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          - script: |
+              trivy fs \
+                --scanners secret \
+                --secret-config "$(Build.SourcesDirectory)/trivy-secret.yaml" \
+                --exit-code 1 \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Scan secrets with Trivy'
+
+      # ========================================================
+      # QODANA SAST
+      # ========================================================
+      - job: Qodana
+        displayName: 'Qodana SAST'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+            persistCredentials: true
+
+          - task: Cache@2
+            displayName: 'Cache Qodana'
+            inputs:
+              key: '"qodana" | "$(Build.Repository.Name)" | "$(Build.SourceBranchName)"'
+              path: '$(Agent.TempDirectory)/qodana/cache'
+              restoreKeys: |
+                "qodana" | "$(Build.Repository.Name)"
+                "qodana"
+
+          - task: QodanaScan@2026
+            displayName: 'Run Qodana'
+            inputs:
+              uploadResult: true
+            env:
+              QODANA_TOKEN: $(QODANA_TOKEN)
