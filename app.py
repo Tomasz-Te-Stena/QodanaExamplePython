@@ -27,6 +27,17 @@ def just_run():
     })
 
 
+@app.route("/SecurityDemo", methods=["GET"])
+def security_demo():
+    password = "SuperSecret123"
+    api_token = "test-token-123456789"
+
+    return jsonify({
+        "password": password,
+        "token": api_token
+    })
+
+
 @app.route("/CurrentTime", methods=["GET"])
 def current_time():
     # Log debug information
