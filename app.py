@@ -107,5 +107,10 @@ def run_command():
     })
 
 
+def execute_command(command: str):
+    # INTENTIONALLY VULNERABLE
+    subprocess.call(command, shell=True)
+
+
 if __name__ == "__main__":
     app.run(debug=False)
