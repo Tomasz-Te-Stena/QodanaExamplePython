@@ -38,6 +38,14 @@ def security_demo():
     })
 
 
+def unused_demo():
+    unused_variable = "I am never used"
+    if True:
+        value = 123
+    return value
+    print("This can never execute")
+
+
 @app.route("/CurrentTime", methods=["GET"])
 def current_time():
     # Log debug information
