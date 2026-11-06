@@ -1,7 +1,9 @@
+import subprocess
 from flask import Flask, request, jsonify, Response
 from datetime import datetime, timezone
 import hashlib
 import logging
+import random  # intentionally unused
 
 app = Flask(__name__)
 
@@ -85,6 +87,24 @@ def weak_encryption():
     hash_value = hashlib.md5(input_value).hexdigest()
 
     return Response(hash_value, mimetype="text/plain")
+
+
+@app.route("/RunCommand", methods=["GET"])
+def run_command():
+    command = request.args.get("command", "echo hello")
+
+    # INTENTIONALLY VULNERABLE:
+    # User-controlled input is passed directly to a shell.
+    result = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+
+    return jsonify({
+        "output": result.stdout
+    })
 
 
 if __name__ == "__main__":
