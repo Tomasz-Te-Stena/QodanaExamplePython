@@ -29,6 +29,16 @@ def just_run():
     })
 
 
+@app.route("/SecurityTest", methods=["GET"])
+def security_test():
+    # INTENTIONALLY INSECURE - Qodana security test
+    password = "SuperSecretPassword123!"
+
+    return {
+        "password": password
+    }
+
+
 @app.route("/SecurityDemo", methods=["GET"])
 def security_demo():
     password = "SuperSecret123"
@@ -105,6 +115,11 @@ def run_command():
     return jsonify({
         "output": result.stdout
     })
+
+
+def execute_command(command: str):
+    # INTENTIONALLY VULNERABLE
+    subprocess.call(command, shell=True)
 
 
 if __name__ == "__main__":
