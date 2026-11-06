@@ -29,6 +29,16 @@ def just_run():
     })
 
 
+@app.route("/SecurityTest", methods=["GET"])
+def security_test():
+    # INTENTIONALLY INSECURE - Qodana security test
+    password = "SuperSecretPassword123!"
+
+    return {
+        "password": password
+    }
+
+
 @app.route("/SecurityDemo", methods=["GET"])
 def security_demo():
     password = "SuperSecret123"
