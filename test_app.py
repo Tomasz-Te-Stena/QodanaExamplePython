@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from app import app
+from app import app, execute_command, unused_demo
 
 
 @pytest.fixture
@@ -68,3 +68,24 @@ def test_read_file(client, tmp_path):
     # Assert
     assert response.status_code == 200
     assert response.get_data(as_text=True) == "Hello from test file"
+
+
+# The two tests below cover plain (undecorated) functions.
+# Mutmut skips decorated functions such as Flask routes, so without these
+# it finds no test for any mutant and stops early.
+def test_unused_demo():
+    assert unused_demo() == 123
+
+
+def test_execute_command(monkeypatch):
+    calls = []
+
+    def fake_call(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0
+
+    monkeypatch.setattr("subprocess.call", fake_call)
+
+    execute_command("echo hello")
+
+    assert calls == [(("echo hello",), {"shell": True})]
