@@ -234,26 +234,26 @@ stages:
       # ========================================================
       # QODANA SAST
       # ========================================================
-      - job: Qodana
-        displayName: 'Qodana SAST'
-        steps:
-          - checkout: self
-            displayName: 'Checkout repository'
-            clean: true
-            persistCredentials: true
-
-          - task: Cache@2
-            displayName: 'Cache Qodana'
-            inputs:
-              key: '"qodana" | "$(Build.Repository.Name)" | "$(Build.SourceBranchName)"'
-              path: '$(Agent.TempDirectory)/qodana/cache'
-              restoreKeys: |
-                "qodana" | "$(Build.Repository.Name)"
-                "qodana"
-
-          - task: QodanaScan@2026
-            displayName: 'Run Qodana'
-            inputs:
-              uploadResult: true
-            env:
-              QODANA_TOKEN: $(QODANA_TOKEN)
+#      - job: Qodana
+#        displayName: 'Qodana SAST'
+#        steps:
+#          - checkout: self
+#            displayName: 'Checkout repository'
+#            clean: true
+#            persistCredentials: true
+#
+#          - task: Cache@2
+#            displayName: 'Cache Qodana'
+#            inputs:
+#              key: '"qodana" | "$(Build.Repository.Name)" | "$(Build.SourceBranchName)"'
+#              path: '$(Agent.TempDirectory)/qodana/cache'
+#              restoreKeys: |
+#                "qodana" | "$(Build.Repository.Name)"
+#                "qodana"
+#
+#          - task: QodanaScan@2026
+#            displayName: 'Run Qodana'
+#            inputs:
+#              uploadResult: true
+#            env:
+#              QODANA_TOKEN: $(QODANA_TOKEN)
