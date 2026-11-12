@@ -726,6 +726,11 @@ stages:
           # Checks the image itself (not the Dockerfile): runs as
           # root, setuid/setgid files, credentials left in files
           # or ENV, missing HEALTHCHECK, ... WARN and FATAL fail.
+          # DKL-DI-0005 (clear apt-get caches) is ignored: it is
+          # raised by a layer of the python base image, which
+          # cleans up with "apt-get dist-clean" - a command Dockle
+          # does not recognise. Our own Dockerfile removes
+          # /var/lib/apt/lists itself.
           # ====================================================
           - script: |
               docker run --rm \
@@ -733,6 +738,7 @@ stages:
                 "$(dockleImage)" \
                 --exit-code 1 \
                 --exit-level warn \
+                --ignore DKL-DI-0005 \
                 "$(imageName):$(imageTag)"
             displayName: 'Check image with Dockle (CIS benchmark)'
             condition: succeededOrFailed()
