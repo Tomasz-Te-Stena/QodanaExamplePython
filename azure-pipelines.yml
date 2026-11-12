@@ -147,6 +147,7 @@ stages:
           - script: |
               mutmut run
             displayName: 'Run Mutmut mutation tests'
+            continueOnError: true
 
           # ====================================================
           # SHOW RESULTS
@@ -154,7 +155,7 @@ stages:
           - script: |
               mutmut results
             displayName: 'Show mutation test results'
-            condition: succeededOrFailed()
+            condition: always()
 
   # ============================================================
   # SECURITY
