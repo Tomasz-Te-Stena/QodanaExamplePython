@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify, Response
 from datetime import datetime, timezone
 import hashlib
 import logging
-import random  # intentionally unused
+import random  # noqa: F401 - intentionally unused (demo finding)
 
 app = Flask(__name__)
 
@@ -59,7 +59,7 @@ def security_demo():
 
 
 def unused_demo():
-    unused_variable = "I am never used"
+    unused_variable = "I am never used"  # noqa: F841 - intentional (demo finding)
     if True:
         value = 123
     return value

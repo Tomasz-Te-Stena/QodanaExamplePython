@@ -1,0 +1,90 @@
+openapi: 3.0.3
+info:
+  title: Qodana Example Python
+  description: Intentionally insecure Flask demo API. Read by the OWASP ZAP API scan.
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000
+paths:
+  /JustRun:
+    get:
+      summary: Returns a fixed JSON document
+      parameters:
+        - name: debug
+          in: query
+          required: false
+          schema:
+            type: string
+            example: 'false'
+      responses:
+        '200':
+          description: OK
+    post:
+      summary: Returns a fixed JSON document
+      responses:
+        '200':
+          description: OK
+  /SecurityTest:
+    get:
+      summary: Returns a password read from the environment
+      responses:
+        '200':
+          description: OK
+  /SecurityDemo:
+    get:
+      summary: Returns a password and a token
+      responses:
+        '200':
+          description: OK
+  /CurrentTime:
+    get:
+      summary: Current UTC time
+      parameters:
+        - name: debug
+          in: query
+          required: false
+          schema:
+            type: string
+            example: 'false'
+      responses:
+        '200':
+          description: OK
+  /ReadFile:
+    get:
+      summary: Returns the content of a file
+      parameters:
+        - name: file
+          in: query
+          required: true
+          schema:
+            type: string
+            example: requirements.txt
+      responses:
+        '200':
+          description: OK
+  /WeakEncryption:
+    get:
+      summary: Returns an MD5 hash
+      parameters:
+        - name: debug
+          in: query
+          required: false
+          schema:
+            type: string
+            example: 'false'
+      responses:
+        '200':
+          description: OK
+  /RunCommand:
+    get:
+      summary: Runs a shell command and returns its output
+      parameters:
+        - name: command
+          in: query
+          required: false
+          schema:
+            type: string
+            example: echo hello
+      responses:
+        '200':
+          description: OK
