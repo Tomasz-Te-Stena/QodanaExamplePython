@@ -227,6 +227,17 @@ stages:
             condition: always()
 
           # ====================================================
+          # SURVIVING MUTANTS WITH SOURCE LINES
+          # For every mutant that was not killed: the file and
+          # line in app.py, the original line and the mutated
+          # line that no test noticed. Information only.
+          # ====================================================
+          - script: |
+              python scripts/mutmut_survivors.py
+            displayName: 'Show surviving mutants (file and line)'
+            condition: always()
+
+          # ====================================================
           # MUTATION SCORE THRESHOLD
           # score = killed / (total - skipped)
           # ====================================================
