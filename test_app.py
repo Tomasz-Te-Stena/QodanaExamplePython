@@ -47,7 +47,7 @@ def test_weak_encryption(client):
 
     assert response.status_code == 200
 
-    expected_hash = hashlib.md5(
+    expected_hash = hashlib.sha256(
         b"SensitivePassword123"
     ).hexdigest()
 
@@ -59,10 +59,12 @@ def test_read_file(client, tmp_path):
     test_file = tmp_path / "test.txt"
     test_file.write_text("Hello from test file")
 
+    app.config["FILES_DIR"] = str(tmp_path)
+
     # Act
     response = client.get(
         "/ReadFile",
-        query_string={"file": str(test_file)}
+        query_string={"file": "test.txt"}
     )
 
     # Assert
@@ -88,4 +90,28 @@ def test_execute_command(monkeypatch):
 
     execute_command("echo hello")
 
-    assert calls == [(("echo hello",), {"shell": True})]
+    assert calls == [((["echo", "hello"],), {})]
+
+
+def test_read_file_rejects_path_traversal(client, tmp_path):
+    app.config["FILES_DIR"] = str(tmp_path)
+
+    response = client.get(
+        "/ReadFile",
+        query_string={"file": "../secret.txt"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_read_file_requires_file_parameter(client):
+    response = client.get("/ReadFile")
+
+    assert response.status_code == 400
+
+
+def test_run_command(client):
+    response = client.get("/RunCommand")
+
+    assert response.status_code == 200
+    assert response.get_json()["output"].strip() == "hello"
