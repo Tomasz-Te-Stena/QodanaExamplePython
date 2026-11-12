@@ -654,6 +654,54 @@ stages:
               targetPath: '$(sarifDir)'
               artifact: 'sarif-bandit'
 
+      # ========================================================
+      # PIP-AUDIT SCA
+      # Checks requirements.txt AND everything it pulls in
+      # (Werkzeug, Jinja2, ...) against the PyPI advisory database.
+      # Trivy SCA only sees the packages listed in the file.
+      # pip-audit has no SARIF output: findings are in the log and
+      # in the "pip-audit" artifact (JSON), not in the Scans tab.
+      # ========================================================
+      - job: PipAudit
+        displayName: 'pip-audit SCA'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install pip-audit
+              pip-audit --version
+            displayName: 'Install pip-audit'
+
+          # JSON report for the artifact. Never fails the job.
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/pip-audit"
+
+              pip-audit -r requirements.txt --desc \
+                -f json -o "$(Build.ArtifactStagingDirectory)/pip-audit/pip-audit.json" \
+                || true
+            displayName: 'pip-audit report (JSON)'
+
+          # The gate: any known vulnerability fails the job.
+          - script: |
+              pip-audit -r requirements.txt --desc
+            displayName: 'Run pip-audit (fail on vulnerabilities)'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish pip-audit report'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/pip-audit'
+              artifact: 'pip-audit'
+
   # ============================================================
   # CONTAINER SECURITY
   # Builds the Docker image once, then three jobs run in parallel
