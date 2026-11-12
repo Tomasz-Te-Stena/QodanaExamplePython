@@ -605,6 +605,55 @@ stages:
               targetPath: '$(sarifDir)'
               artifact: 'sarif-semgrep'
 
+      # ========================================================
+      # BANDIT SAST
+      # Python-specific security linter (PyCQA). Fails on findings
+      # of MEDIUM or HIGH severity; LOW findings (e.g. "subprocess
+      # is imported", "assert used" in tests) are only listed.
+      # ========================================================
+      - job: Bandit
+        displayName: 'Bandit SAST'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install "bandit[sarif]"
+              bandit --version
+            displayName: 'Install Bandit'
+
+          # All findings (also LOW) in SARIF for the Scans tab and
+          # as readable text in the log. Never fails the job.
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              bandit -r . -x ./.venv,./mutants \
+                --exit-zero \
+                -f sarif -o "$(sarifDir)/bandit.sarif"
+
+              bandit -r . -x ./.venv,./mutants --exit-zero
+            displayName: 'Bandit report (all findings + SARIF)'
+
+          # The gate: MEDIUM and HIGH severity findings fail the job.
+          - script: |
+              bandit -r . -x ./.venv,./mutants --severity-level medium
+            displayName: 'Run Bandit SAST (fail on medium/high)'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-bandit'
+
   # ============================================================
   # CONTAINER SECURITY
   # Builds the Docker image once, then three jobs run in parallel
@@ -1155,7 +1204,7 @@ stages:
   # ============================================================
   # REPORTS
   # Collects the SARIF files of every scanner (Trivy, Gitleaks,
-  # Hadolint, Semgrep, Nuclei) into one "CodeAnalysisLogs"
+  # Hadolint, Semgrep, Bandit, Nuclei) into one "CodeAnalysisLogs"
   # artifact. With the free "SARIF SAST Scans Tab" extension
   # (Microsoft DevLabs) installed in the Azure DevOps
   # organisation, all findings show in a "Scans" tab of the run.
