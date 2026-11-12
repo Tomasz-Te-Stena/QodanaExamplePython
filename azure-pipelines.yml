@@ -5,12 +5,32 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  pythonVersion: '3.12'
+  pythonVersion: '3.12'     # same version as the python:3.12-slim image
   mainFile: 'app.py'        # main PY file to run
   testFile: 'test_app.py'   # unit test file
   imageName: 'qodana-example-python'
   imageTag: '$(Build.BuildId)'
   containerName: 'qodana-example-python-smoke'
+  appPort: '5000'
+
+  # Mutation testing: the build fails below this score (percent).
+  # Kept low because unused_demo() in app.py contains dead code on
+  # purpose, and mutants in dead code always survive.
+  mutationScoreBreak: '20'
+
+  # Tools
+  nucleiVersion: '3.11.1'
+  dastFailOn: 'medium,high,critical'   # Nuclei severities that fail the build
+  zapImage: 'ghcr.io/zaproxy/zaproxy:2.17.0'
+  zapFailOnRisk: '2'                   # ZAP risk that fails the build: 3 High, 2 Medium, 1 Low
+  gitleaksImage: 'zricethezav/gitleaks:v8.30.1'
+  hadolintImage: 'hadolint/hadolint:v2.15.1'
+  dockleImage: 'goodwithtech/dockle:v0.4.15'
+
+  # SARIF reports of all scanners are collected into this folder and
+  # published as "CodeAnalysisLogs" (read by the "SARIF SAST Scans
+  # Tab" extension, which shows all findings in one tab of the run).
+  sarifDir: '$(Build.ArtifactStagingDirectory)/sarif'
 
 stages:
 
@@ -38,15 +58,58 @@ stages:
               python -m pip --version
             displayName: 'Show Python information'
 
+          # ====================================================
+          # REQUIREMENTS LINT (supply chain)
+          # Every line in requirements.txt must be a plain
+          # "name==version" pin: no unpinned packages, no URLs,
+          # no alternative index (-i / --index-url), no local
+          # paths. Blocks a tampered file that points elsewhere.
+          # ====================================================
+          - script: |
+              BAD=$(grep -vE '^[[:space:]]*(#.*)?$' requirements.txt \
+                | grep -vE '^[A-Za-z0-9._-]+(\[[A-Za-z0-9,._-]+\])?==[A-Za-z0-9.*+!_-]+[[:space:]]*$' \
+                || true)
+
+              if [ -n "$BAD" ]; then
+                echo "Lines that are not a plain 'name==version' pin:"
+                echo "$BAD"
+                exit 1
+              fi
+
+              echo "All requirements are pinned to an exact version."
+            displayName: 'Lint requirements.txt (pinned versions)'
+
+          # ====================================================
+          # INSTALL DEPENDENCIES
+          # --only-binary :all: (used for every install of
+          # requirements.txt in this pipeline): only wheels are
+          # installed, so no setup.py of a compromised dependency
+          # can execute code on the agent.
+          # ====================================================
           - script: |
               python -m pip install --upgrade pip
-              pip install -r requirements.txt
+              pip install --only-binary :all: -r requirements.txt
             displayName: 'Install dependencies'
+
+          # Installed packages must have compatible requirements.
+          - script: |
+              pip check
+            displayName: 'Verify installed dependencies (pip check)'
+
+          # ====================================================
+          # RUFF (linter)
+          # Rules are selected in pyproject.toml.
+          # ====================================================
+          - script: |
+              pip install ruff
+              ruff --version
+              ruff check "$(mainFile)" "$(testFile)"
+            displayName: 'Run Ruff'
 
           # Python doesn't have a compilation step like C#,
           # but compileall catches syntax errors.
           - script: |
-              python -m compileall app.py test_app.py
+              python -m compileall "$(mainFile)" "$(testFile)"
             displayName: 'Validate Python syntax'
 
   # ============================================================
@@ -71,7 +134,7 @@ stages:
 
           - script: |
               python -m pip install --upgrade pip
-              pip install -r requirements.txt
+              pip install --only-binary :all: -r requirements.txt
               pip install pytest pytest-cov
             displayName: 'Install test dependencies'
 
@@ -111,6 +174,12 @@ stages:
 
       # ========================================================
       # MUTATION TESTING (Mutmut)
+      # Mutmut changes app.py in small ways and expects the tests
+      # to fail for each change. The mutation score shows how many
+      # real bugs the tests would catch - coverage alone cannot.
+      # Fails below $(mutationScoreBreak) percent.
+      # Note: Mutmut skips decorated functions, so the Flask
+      # routes (@app.route) are not mutated.
       # ========================================================
       - job: Mutmut
         displayName: 'Python Mutation Tests'
@@ -130,7 +199,7 @@ stages:
           # ====================================================
           - script: |
               python -m pip install --upgrade pip
-              pip install -r requirements.txt
+              pip install --only-binary :all: -r requirements.txt
               pip install pytest mutmut
             displayName: 'Install mutation testing dependencies'
 
@@ -156,6 +225,45 @@ stages:
               mutmut results
             displayName: 'Show mutation test results'
             condition: always()
+
+          # ====================================================
+          # MUTATION SCORE THRESHOLD
+          # score = killed / (total - skipped)
+          # ====================================================
+          - script: |
+              set -e
+
+              mutmut export-cicd-stats
+              cat mutants/mutmut-cicd-stats.json
+
+              python - <<'PY'
+              import json
+              import sys
+
+              stats = json.load(open("mutants/mutmut-cicd-stats.json"))
+              checked = stats["total"] - stats["skipped"]
+              threshold = float("$(mutationScoreBreak)")
+
+              if checked <= 0:
+                  print("##vso[task.logissue type=error]Mutmut checked no mutants.")
+                  sys.exit(1)
+
+              score = 100.0 * stats["killed"] / checked
+              print(f"Mutation score: {score:.1f}% ({stats['killed']} of {checked} mutants killed), threshold {threshold:.0f}%")
+
+              if score < threshold:
+                  print(f"##vso[task.logissue type=error]Mutation score {score:.1f}% is below the threshold of {threshold:.0f}%.")
+                  sys.exit(1)
+              PY
+            displayName: 'Check mutation score'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish mutation report'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Build.SourcesDirectory)/mutants/mutmut-cicd-stats.json'
+              artifact: 'mutation-report'
 
   # ============================================================
   # SECURITY
@@ -198,6 +306,25 @@ stages:
                 "$(Build.SourcesDirectory)"
             displayName: 'Scan Python dependencies with Trivy'
 
+          # Same scan as SARIF for the Scans tab (never fails).
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              trivy fs \
+                --scanners vuln \
+                --format sarif \
+                --output "$(sarifDir)/trivy-fs-vuln.sarif" \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Trivy SCA report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-trivy-fs-vuln'
+
       # ========================================================
       # TRIVY SECRET SCAN
       # ========================================================
@@ -232,6 +359,173 @@ stages:
                 "$(Build.SourcesDirectory)"
             displayName: 'Scan secrets with Trivy'
 
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              trivy fs \
+                --scanners secret \
+                --secret-config "$(Build.SourcesDirectory)/trivy-secret.yaml" \
+                --format sarif \
+                --output "$(sarifDir)/trivy-fs-secret.sarif" \
+                "$(Build.SourcesDirectory)"
+            displayName: 'Trivy secrets report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-trivy-fs-secret'
+
+      # ========================================================
+      # GITLEAKS - SECRETS IN THE WHOLE GIT HISTORY
+      # Trivy only sees the current files. Gitleaks scans every
+      # commit, so a secret that was committed and later deleted
+      # is still found. Accepted old findings are listed (with a
+      # reason) in .gitleaksignore; anything new fails the build.
+      # ========================================================
+      - job: Gitleaks
+        displayName: 'Gitleaks (git history secrets)'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository (full history)'
+            clean: true
+            fetchDepth: 0        # all commits, not a shallow clone
+
+          - script: |
+              mkdir -p "$(sarifDir)"
+              chmod 777 "$(sarifDir)"
+
+              docker run --rm \
+                -v "$(Build.SourcesDirectory):/repo" \
+                -v "$(sarifDir):/out" \
+                "$(gitleaksImage)" \
+                git /repo \
+                --redact \
+                --verbose \
+                --no-banner \
+                --report-format sarif \
+                --report-path /out/gitleaks.sarif
+            displayName: 'Scan git history with Gitleaks'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-gitleaks'
+
+      # ========================================================
+      # HADOLINT - DOCKERFILE LINTER
+      # Dockerfile best practices: JSON-form CMD/HEALTHCHECK,
+      # pinned versions, pip cache handling, merged RUN layers,
+      # ... Any finding fails the build.
+      # ========================================================
+      - job: Hadolint
+        displayName: 'Hadolint (Dockerfile lint)'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - script: |
+              docker run --rm -i "$(hadolintImage)" hadolint - < Dockerfile
+            displayName: 'Lint Dockerfile with Hadolint'
+
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              docker run --rm -i "$(hadolintImage)" hadolint --format sarif --no-fail - \
+                < Dockerfile \
+                > "$(sarifDir)/hadolint.sarif"
+            displayName: 'Hadolint report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-hadolint'
+
+      # ========================================================
+      # DEPENDENCY FRESHNESS (information only, never fails)
+      # ========================================================
+      - job: DependencyCheck
+        displayName: 'Newer dependency versions'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          # A clean virtual environment, so only this project's
+          # packages are listed (not the agent's own).
+          - script: |
+              python -m venv "$(Agent.TempDirectory)/venv"
+              . "$(Agent.TempDirectory)/venv/bin/activate"
+
+              pip install --only-binary :all: -r requirements.txt
+
+              # Prints Version / Latest for every package that has a
+              # newer version on PyPI; "|| true" keeps the step green.
+              pip list --outdated || true
+            displayName: 'List newer dependency versions'
+
+      # ========================================================
+      # SBOM (Software Bill of Materials)
+      # CycloneDX JSON of the Python packages in requirements.txt.
+      # ========================================================
+      - job: SBOM
+        displayName: 'Generate SBOM'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/sbom"
+
+              trivy fs \
+                --format cyclonedx \
+                --output "$(Build.ArtifactStagingDirectory)/sbom/sbom.cdx.json" \
+                "$(Build.SourcesDirectory)"
+
+              python3 -c "
+              import json
+              s = json.load(open('$(Build.ArtifactStagingDirectory)/sbom/sbom.cdx.json'))
+              print('CycloneDX ' + s['specVersion'] + ', ' + str(len(s.get('components', []))) + ' components')
+              "
+            displayName: 'Generate CycloneDX SBOM'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SBOM artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/sbom'
+              artifact: 'sbom'
+
       # ========================================================
       # QODANA SAST
       # ========================================================
@@ -259,48 +553,630 @@ stages:
 #            env:
 #              QODANA_TOKEN: $(QODANA_TOKEN)
 
+      # ========================================================
+      # SEMGREP SAST
+      # ========================================================
+      - job: Semgrep
+        displayName: 'Semgrep SAST'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install semgrep
+              semgrep --version
+            displayName: 'Install Semgrep'
+
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              # Readable findings in the log + SARIF for the Scans tab.
+              semgrep scan \
+                --config p/python \
+                --config p/flask \
+                --error \
+                --sarif-output="$(sarifDir)/semgrep.sarif" \
+                .
+            displayName: 'Run Semgrep SAST'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-semgrep'
+
   # ============================================================
-  # DOCKER
+  # CONTAINER SECURITY
+  # Builds the Docker image once, then three jobs run in parallel
+  # on exactly that image:
+  #   - TrivyContainer: Dockerfile config, image SCA, secrets,
+  #                     Dockle (CIS), container SBOM + licenses
+  #   - SmokeAndDAST:   starts a locked-down container, smoke-tests
+  #                     the API, runs Nuclei DAST against it
+  #   - ZapDAST:        OWASP ZAP API scan driven by openapi.yaml
   # ============================================================
-  - stage: Docker
-    displayName: 'Docker'
+  - stage: ContainerSecurity
+    displayName: 'Container Security'
     dependsOn: Security
     jobs:
-      - job: BuildAndSmokeTest
-        displayName: 'Build image and smoke test'
+
+      # ========================================================
+      # BUILD CONTAINER
+      # ========================================================
+      - job: BuildContainer
+        displayName: 'Build Docker image'
         steps:
           - checkout: self
             displayName: 'Checkout repository'
             clean: true
 
           - script: |
-              docker build -t "$(imageName):$(imageTag)" .
+              DOCKER_BUILDKIT=1 docker build \
+                --pull \
+                -t "$(imageName):$(imageTag)" \
+                .
+
+              docker image ls "$(imageName)"
             displayName: 'Build Docker image'
 
+          # Save the image so the parallel jobs below use exactly
+          # the same image (each job runs on a fresh agent).
           - script: |
-              docker run -d --name "$(containerName)" -p 5000:5000 "$(imageName):$(imageTag)"
+              mkdir -p "$(Build.ArtifactStagingDirectory)/docker"
+
+              docker save \
+                "$(imageName):$(imageTag)" \
+                -o "$(Build.ArtifactStagingDirectory)/docker/$(imageName).tar"
+            displayName: 'Save Docker image'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Docker image artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/docker'
+              artifact: 'docker-image'
+
+      # ========================================================
+      # TRIVY: DOCKERFILE + IMAGE SCA + SECRETS + SBOM
+      # ========================================================
+      - job: TrivyContainer
+        displayName: 'Trivy Container SCA + SBOM'
+        dependsOn: BuildContainer
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Docker image'
+            inputs:
+              artifact: 'docker-image'
+              path: '$(Pipeline.Workspace)/docker'
+
+          - script: |
+              docker load -i "$(Pipeline.Workspace)/docker/$(imageName).tar"
+            displayName: 'Load Docker image'
+
+          - script: |
+              sudo apt-get install -y wget gnupg
+
+              wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+                | gpg --dearmor \
+                | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+              echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+                | sudo tee /etc/apt/sources.list.d/trivy.list
+
+              sudo apt-get update
+              sudo apt-get install -y trivy
+
+              trivy --version
+            displayName: 'Install Trivy'
+
+          # ====================================================
+          # SAST FOR CONTAINERS: DOCKERFILE MISCONFIGURATION
+          # Static analysis of the Dockerfile (running as root,
+          # missing USER, unpinned images, secrets in ENV, ...).
+          # ====================================================
+          - script: |
+              trivy config \
+                --severity HIGH,CRITICAL \
+                --exit-code 1 \
+                Dockerfile
+            displayName: 'Scan Dockerfile (misconfiguration)'
+
+          # ====================================================
+          # SCA: VULNERABILITIES IN THE IMAGE
+          # OS packages (Debian) + Python packages inside the
+          # final image. --ignore-unfixed skips CVEs that have no
+          # fix available yet, so the build only fails on what
+          # can actually be acted on.
+          # ====================================================
+          - script: |
+              trivy image \
+                --scanners vuln \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                --exit-code 1 \
+                "$(imageName):$(imageTag)"
+            displayName: 'Scan image vulnerabilities (SCA)'
+            condition: succeededOrFailed()
+
+          # ====================================================
+          # SECRETS BAKED INTO IMAGE LAYERS
+          # ====================================================
+          - script: |
+              trivy image \
+                --scanners secret \
+                --exit-code 1 \
+                "$(imageName):$(imageTag)"
+            displayName: 'Scan image for secrets'
+            condition: succeededOrFailed()
+
+          # ====================================================
+          # DOCKLE - CIS DOCKER BENCHMARK ON THE BUILT IMAGE
+          # Checks the image itself (not the Dockerfile): runs as
+          # root, setuid/setgid files, credentials left in files
+          # or ENV, missing HEALTHCHECK, ... WARN and FATAL fail.
+          # ====================================================
+          - script: |
+              docker run --rm \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                "$(dockleImage)" \
+                --exit-code 1 \
+                --exit-level warn \
+                "$(imageName):$(imageTag)"
+            displayName: 'Check image with Dockle (CIS benchmark)'
+            condition: succeededOrFailed()
+
+          # Image vulnerabilities + secrets as SARIF (never fails).
+          - script: |
+              mkdir -p "$(sarifDir)"
+
+              trivy image \
+                --scanners vuln,secret \
+                --format sarif \
+                --output "$(sarifDir)/trivy-image.sarif" \
+                "$(imageName):$(imageTag)"
+            displayName: 'Trivy image report (SARIF)'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-trivy-image'
+
+          # ====================================================
+          # CONTAINER SBOM
+          # Unlike the source SBOM (packages in requirements.txt),
+          # this covers everything in the final image: Debian OS
+          # packages, the Python runtime and the installed
+          # site-packages.
+          # ====================================================
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/sbom"
+
+              trivy image \
+                --format cyclonedx \
+                --output "$(Build.ArtifactStagingDirectory)/sbom/$(imageName).cdx.json" \
+                "$(imageName):$(imageTag)"
+            displayName: 'Generate container SBOM'
+            condition: succeededOrFailed()
+
+          # ====================================================
+          # LICENSE REPORTS (information only, never fail)
+          # ====================================================
+          - script: |
+              trivy sbom \
+                --scanners license \
+                --pkg-types library \
+                --severity UNKNOWN,HIGH,CRITICAL \
+                "$(Build.ArtifactStagingDirectory)/sbom/$(imageName).cdx.json"
+            displayName: 'SBOM - Application (Python) license report'
+            condition: succeededOrFailed()
+
+          - script: |
+              trivy sbom \
+                --scanners license \
+                --pkg-types os \
+                --severity UNKNOWN,HIGH,CRITICAL \
+                "$(Build.ArtifactStagingDirectory)/sbom/$(imageName).cdx.json"
+            displayName: 'SBOM - Container OS license report'
+            condition: succeededOrFailed()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish container SBOM'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/sbom'
+              artifact: 'container-sbom'
+
+      # ========================================================
+      # SMOKE TESTS + NUCLEI DAST ON THE RUNNING CONTAINER
+      # ========================================================
+      - job: SmokeAndDAST
+        displayName: 'Smoke tests + Nuclei DAST'
+        dependsOn: BuildContainer
+        steps:
+          - checkout: none
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Docker image'
+            inputs:
+              artifact: 'docker-image'
+              path: '$(Pipeline.Workspace)/docker'
+
+          - script: |
+              docker load -i "$(Pipeline.Workspace)/docker/$(imageName).tar"
+            displayName: 'Load Docker image'
+
+          # ====================================================
+          # START CONTAINER (LOCKED DOWN)
+          # The container runs the way production should run it,
+          # which proves the app works with minimal rights:
+          #   --read-only          root filesystem cannot be changed
+          #   --tmpfs /tmp         the only writable place, in memory
+          #   --cap-drop ALL       no Linux capabilities at all
+          #   no-new-privileges    setuid binaries cannot gain rights
+          #   --pids-limit/memory  a runaway process cannot take the host
+          # ====================================================
+          - script: |
+              docker run --detach \
+                --name "$(containerName)" \
+                --publish $(appPort):$(appPort) \
+                --read-only \
+                --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+                --cap-drop ALL \
+                --security-opt no-new-privileges \
+                --pids-limit 100 \
+                --memory 256m \
+                "$(imageName):$(imageTag)"
             displayName: 'Start container'
 
-          # Retry until the app answers, fail after ~30 seconds.
+          # ====================================================
+          # WAIT FOR THE DOCKERFILE HEALTHCHECK
+          # ====================================================
           - script: |
-              for i in $(seq 1 15); do
-                if curl -fsS http://localhost:5000/CurrentTime; then
-                  echo
-                  echo "Smoke test passed."
+              echo "Waiting for container..."
+
+              for i in $(seq 1 30); do
+                STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$(containerName)" 2>/dev/null)
+                RUNNING=$(docker inspect --format='{{.State.Running}}' "$(containerName)" 2>/dev/null)
+
+                echo "Attempt $i - running: $RUNNING, health: $STATUS"
+
+                if [ "$STATUS" = "healthy" ]; then
+                  echo "Container is healthy."
+                  exit 0
+                fi
+
+                if [ "$RUNNING" != "true" ] || [ "$STATUS" = "unhealthy" ]; then
+                  echo "Container crashed or is unhealthy."
+                  docker logs "$(containerName)"
+                  exit 1
+                fi
+
+                sleep 2
+              done
+
+              echo "Container did not become healthy in time."
+              docker logs "$(containerName)"
+              exit 1
+            displayName: 'Verify Docker health check'
+
+          # ====================================================
+          # SMOKE TESTS
+          # Real HTTP calls against the real image: catches what
+          # unit tests cannot, e.g. a dependency missing from the
+          # image ("ModuleNotFoundError").
+          # ====================================================
+          - script: |
+              BASE="http://localhost:$(appPort)"
+              FAILED=0
+
+              check() {
+                # check <name> <path> <expected status> [expected body text]
+                BODY=$(curl --silent --show-error --max-time 5 \
+                  --output - --write-out '\n%{http_code}' "$BASE$2")
+                CODE=$(echo "$BODY" | tail -n 1)
+                TEXT=$(echo "$BODY" | sed '$d')
+
+                if [ "$CODE" != "$3" ]; then
+                  echo "FAIL  $1: expected HTTP $3, got $CODE"
+                  FAILED=1
+                elif [ -n "$4" ] && ! echo "$TEXT" | grep -q "$4"; then
+                  echo "FAIL  $1: response does not contain '$4'"
+                  FAILED=1
+                else
+                  echo "PASS  $1 (HTTP $CODE)"
+                fi
+              }
+
+              check 'current time'     '/CurrentTime'                     200 'time'
+              check 'just run'         '/JustRun'                         200 'pass'
+              check 'security test'    '/SecurityTest'                    200 'password'
+              check 'security demo'    '/SecurityDemo'                    200 'token'
+              check 'weak encryption'  '/WeakEncryption'                  200
+              check 'read file'        '/ReadFile?file=requirements.txt'  200 'Flask'
+              check 'run command'      '/RunCommand?command=echo%20hello' 200 'hello'
+              check 'unknown endpoint' '/does-not-exist'                  404 'Not Found'
+
+              if [ "$FAILED" -ne 0 ]; then
+                echo "========== CONTAINER LOG =========="
+                docker logs "$(containerName)"
+                exit 1
+              fi
+            displayName: 'Smoke tests'
+
+          # ====================================================
+          # INSTALL NUCLEI
+          # ====================================================
+          - script: |
+              set -e
+
+              echo "Downloading Nuclei $(nucleiVersion)..."
+
+              curl -fsSL \
+                --retry 3 \
+                --connect-timeout 15 \
+                --max-time 120 \
+                -o /tmp/nuclei.zip \
+                "https://github.com/projectdiscovery/nuclei/releases/download/v$(nucleiVersion)/nuclei_$(nucleiVersion)_linux_amd64.zip"
+
+              unzip -o /tmp/nuclei.zip nuclei -d /tmp
+              sudo install /tmp/nuclei /usr/local/bin/nuclei
+
+              nuclei -version
+              nuclei -update-templates
+            displayName: 'Install Nuclei'
+            timeoutInMinutes: 5
+
+          # ====================================================
+          # DAST SECURITY SCAN
+          # Nuclei's default CVE / misconfig templates look for
+          # known products and find almost nothing on a plain
+          # Flask server. -dast instead fuzzes the query
+          # parameters of the URLs below (path traversal, command
+          # injection, template injection, ...).
+          # Every finding is printed; severities listed in
+          # $(dastFailOn) fail the job. The job also fails if the
+          # scan crashed the container (a malformed request
+          # killing the server is a DoS finding, and Nuclei would
+          # otherwise just report the target as "unresponsive").
+          # ====================================================
+          - script: |
+              BASE="http://localhost:$(appPort)"
+
+              cat > "$(Agent.TempDirectory)/dast-urls.txt" <<EOF
+              $BASE/ReadFile?file=requirements.txt
+              $BASE/RunCommand?command=echo
+              $BASE/CurrentTime?debug=false
+              $BASE/JustRun?debug=false
+              $BASE/WeakEncryption?debug=false
+              EOF
+
+              mkdir -p "$(sarifDir)"
+
+              nuclei \
+                -list "$(Agent.TempDirectory)/dast-urls.txt" \
+                -dast \
+                -timeout 6 \
+                -retries 1 \
+                -no-color \
+                -jsonl-export "$(Agent.TempDirectory)/nuclei-findings.jsonl" \
+                -sarif-export "$(sarifDir)/nuclei.sarif"
+
+              FINDINGS="$(Agent.TempDirectory)/nuclei-findings.jsonl"
+              touch "$FINDINGS"
+
+              # Nuclei writes no SARIF when nothing is found; an empty
+              # file keeps the publish step working (the Reports stage
+              # skips empty files).
+              touch "$(sarifDir)/nuclei.sarif"
+
+              FAILED=0
+
+              BLOCKING=$(jq -s --arg sev "$(dastFailOn)" \
+                '($sev | split(",")) as $s | [.[] | select(.info.severity as $x | $s | index($x))] | length' \
+                "$FINDINGS")
+              echo "Findings: $(wc -l < "$FINDINGS") total, $BLOCKING with severity in [$(dastFailOn)]."
+
+              if [ "$BLOCKING" -gt 0 ]; then
+                echo "##vso[task.logissue type=error]Nuclei found $BLOCKING issue(s) with severity in [$(dastFailOn)]."
+                FAILED=1
+              fi
+
+              if [ "$(docker inspect --format='{{.State.Running}}' "$(containerName)")" != "true" ]; then
+                echo "##vso[task.logissue type=error]The container crashed during the DAST scan (denial of service)."
+                echo "========== CONTAINER LOG =========="
+                docker logs --tail 30 "$(containerName)"
+                FAILED=1
+              fi
+
+              exit $FAILED
+            displayName: 'Nuclei DAST scan'
+            timeoutInMinutes: 10
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish SARIF'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(sarifDir)'
+              artifact: 'sarif-nuclei'
+
+          # Always clean up
+          - script: |
+              docker rm --force "$(containerName)" || true
+            displayName: 'Stop container'
+            condition: always()
+
+      # ========================================================
+      # OWASP ZAP API SCAN
+      # A second DAST scanner with different checks than Nuclei:
+      # path traversal, SQL / OS command / template injection,
+      # missing security headers, error disclosure, ... It reads
+      # openapi.yaml, so it knows every endpoint and parameter.
+      # Alerts with risk >= $(zapFailOnRisk) fail the job; all
+      # alerts are in the HTML / JSON report artifact.
+      # ========================================================
+      - job: ZapDAST
+        displayName: 'OWASP ZAP API scan'
+        dependsOn: BuildContainer
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Docker image'
+            inputs:
+              artifact: 'docker-image'
+              path: '$(Pipeline.Workspace)/docker'
+
+          - script: |
+              docker load -i "$(Pipeline.Workspace)/docker/$(imageName).tar"
+            displayName: 'Load Docker image'
+
+          - script: |
+              docker run --detach \
+                --name "$(containerName)-zap" \
+                --publish $(appPort):$(appPort) \
+                --read-only \
+                --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+                --cap-drop ALL \
+                --security-opt no-new-privileges \
+                "$(imageName):$(imageTag)"
+
+              for i in $(seq 1 30); do
+                if [ "$(docker inspect --format='{{.State.Health.Status}}' "$(containerName)-zap")" = "healthy" ]; then
+                  echo "Container is healthy."
                   exit 0
                 fi
                 sleep 2
               done
-              echo "Smoke test failed: no response from /CurrentTime."
+
+              echo "Container did not become healthy in time."
+              docker logs "$(containerName)-zap"
               exit 1
-            displayName: 'Smoke test'
+            displayName: 'Start container'
+
+          # ZAP runs as its own user inside its container, so the
+          # report folder must be writable for it.
+          - script: |
+              ZAP_DIR="$(Agent.TempDirectory)/zap"
+              mkdir -p "$ZAP_DIR"
+              chmod 777 "$ZAP_DIR"
+              cp openapi.yaml "$ZAP_DIR/"
+
+              # -I: warnings do not set the exit code; the risk
+              # threshold below decides instead.
+              docker run --rm \
+                --network host \
+                -v "$ZAP_DIR:/zap/wrk:rw" \
+                "$(zapImage)" \
+                zap-api-scan.py \
+                  -t openapi.yaml \
+                  -f openapi \
+                  -O http://localhost:$(appPort) \
+                  -r zap-report.html \
+                  -J zap-report.json \
+                  -I
+              ZAP_EXIT=$?
+
+              if [ ! -f "$ZAP_DIR/zap-report.json" ]; then
+                echo "##vso[task.logissue type=error]ZAP did not produce a report (exit code $ZAP_EXIT)."
+                exit 1
+              fi
+
+              FAILED=0
+
+              BLOCKING=$(jq --arg min "$(zapFailOnRisk)" \
+                '[.site[].alerts[] | select((.riskcode | tonumber) >= ($min | tonumber))] | length' \
+                "$ZAP_DIR/zap-report.json")
+              echo "ZAP alerts with risk >= $(zapFailOnRisk): $BLOCKING"
+
+              if [ "$BLOCKING" -gt 0 ]; then
+                jq -r --arg min "$(zapFailOnRisk)" \
+                  '.site[].alerts[] | select((.riskcode | tonumber) >= ($min | tonumber)) | "  \(.riskdesc): \(.alert) (\(.count)x)"' \
+                  "$ZAP_DIR/zap-report.json"
+                echo "##vso[task.logissue type=error]ZAP found $BLOCKING alert(s) with risk >= $(zapFailOnRisk)."
+                FAILED=1
+              fi
+
+              if [ "$(docker inspect --format='{{.State.Running}}' "$(containerName)-zap")" != "true" ]; then
+                echo "##vso[task.logissue type=error]The container crashed during the ZAP scan (denial of service)."
+                docker logs --tail 30 "$(containerName)-zap"
+                FAILED=1
+              fi
+
+              exit $FAILED
+            displayName: 'OWASP ZAP API scan'
+            timeoutInMinutes: 15
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish ZAP report'
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: '$(Agent.TempDirectory)/zap'
+              artifact: 'zap-report'
 
           - script: |
-              docker logs "$(containerName)"
-            displayName: 'Show container logs'
+              docker rm --force "$(containerName)-zap" || true
+            displayName: 'Stop container'
             condition: always()
 
+  # ============================================================
+  # REPORTS
+  # Collects the SARIF files of every scanner (Trivy, Gitleaks,
+  # Hadolint, Semgrep, Nuclei) into one "CodeAnalysisLogs"
+  # artifact. With the free "SARIF SAST Scans Tab" extension
+  # (Microsoft DevLabs) installed in the Azure DevOps
+  # organisation, all findings show in a "Scans" tab of the run.
+  # Runs even when earlier stages failed - that is when the
+  # findings matter most.
+  # ============================================================
+  - stage: Reports
+    displayName: 'Security reports'
+    dependsOn:
+      - Security
+      - ContainerSecurity
+    condition: always()
+    jobs:
+      - job: CollectSarif
+        displayName: 'Collect SARIF reports'
+        steps:
+          - checkout: none
+
+          # Downloads every artifact named sarif-* (each into its
+          # own folder); missing ones (skipped jobs) are fine.
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download SARIF artifacts'
+            inputs:
+              buildType: current
+              itemPattern: 'sarif-*/**'
+              path: '$(Pipeline.Workspace)/sarif-in'
+
           - script: |
-              docker rm -f "$(containerName)"
-            displayName: 'Remove container'
-            condition: always()
+              mkdir -p "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs"
+
+              find "$(Pipeline.Workspace)/sarif-in" -name '*.sarif' -size +0 \
+                -exec cp {} "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/" \;
+
+              ls -la "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs"
+            displayName: 'Merge SARIF files'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish CodeAnalysisLogs'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs'
+              artifact: 'CodeAnalysisLogs'

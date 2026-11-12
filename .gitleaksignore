@@ -1,0 +1,3 @@
+# Accepted Gitleaks findings, one fingerprint per line, each with a reason.
+# The fingerprint is printed by Gitleaks for every finding ("Fingerprint: ...").
+# Anything not listed here fails the "Gitleaks" job.
