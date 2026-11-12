@@ -1,3 +1,4 @@
+import os
 import subprocess
 from flask import Flask, request, jsonify, Response
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
 
-# UNCOMMENT / MODIFY TO HAVE SECURITY ISSUE - HARDCODED SECRET
+# UNCOMMENT the next line to see the security scans fail (hard-coded password).
 # password = "SuperSecret123"
 
 
@@ -31,8 +32,11 @@ def just_run():
 
 @app.route("/SecurityTest", methods=["GET"])
 def security_test():
+    password = os.environ.get("DEMO_PASSWORD", "")
+
     # INTENTIONALLY INSECURE - Qodana security test
-    password = "SuperSecretPassword123!"
+    # UNCOMMENT the next line to see the security scans fail (hard-coded password).
+    # password = "SuperSecretPassword123!"
 
     return {
         "password": password
@@ -41,8 +45,12 @@ def security_test():
 
 @app.route("/SecurityDemo", methods=["GET"])
 def security_demo():
-    password = "SuperSecret123"
+    password = os.environ.get("DEMO_PASSWORD", "")
     api_token = "test-token-123456789"
+
+    # INTENTIONALLY INSECURE
+    # UNCOMMENT the next line to see the security scans fail (hard-coded password).
+    # password = "SuperSecret123"
 
     return jsonify({
         "password": password,
