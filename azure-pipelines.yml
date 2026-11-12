@@ -6,7 +6,11 @@ pool:
 
 variables:
   pythonVersion: '3.12'
-
+  mainFile: 'app.py'        # main PY file to run
+  testFile: 'test_app.py'   # unit test file
+  imageName: 'qodana-example-python'
+  imageTag: '$(Build.BuildId)'
+  containerName: 'qodana-example-python-smoke'
 
 stages:
 
@@ -104,6 +108,53 @@ stages:
             condition: succeededOrFailed()
             inputs:
               summaryFileLocation: '$(Agent.TempDirectory)/Coverage/coverage.xml'
+
+      # ========================================================
+      # MUTATION TESTING (Mutmut)
+      # ========================================================
+      - job: Mutmut
+        displayName: 'Python Mutation Tests'
+        steps:
+          - checkout: self
+            displayName: 'Checkout repository'
+            clean: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Install Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+
+          # ====================================================
+          # INSTALL DEPENDENCIES
+          # ====================================================
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+              pip install pytest mutmut
+            displayName: 'Install mutation testing dependencies'
+
+          # ====================================================
+          # VERIFY NORMAL TESTS FIRST
+          # ====================================================
+          - script: |
+              pytest $(testFile) -v
+            displayName: 'Verify unit tests'
+
+          # ====================================================
+          # MUTATION TESTING
+          # ====================================================
+          - script: |
+              mutmut run
+            displayName: 'Run Mutmut mutation tests'
+
+          # ====================================================
+          # SHOW RESULTS
+          # ====================================================
+          - script: |
+              mutmut results
+            displayName: 'Show mutation test results'
+            condition: succeededOrFailed()
 
   # ============================================================
   # SECURITY
