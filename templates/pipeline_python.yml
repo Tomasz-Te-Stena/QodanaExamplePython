@@ -14,8 +14,6 @@ variables:
   imageTag: '$(Build.BuildId)'
   containerName: 'qodana-example-python-smoke'
   appPort: '5000'
-  # Path to dockerfile. Empty value means no Dockerfile.
-  # dockerfilePath: 'QodanaCode/Dockerfile'
 
   # Mutation testing: the build fails below this score (percent).
   # Kept low because unused_demo() in app.py contains dead code on
@@ -155,7 +153,7 @@ stages:
           # ====================================================
           - script: |
               pytest \
-                test_app.py \
+                "$(testFile)" \
                 -v \
                 --junitxml="$(Agent.TempDirectory)/TestResults/test-results.xml" \
                 --cov=app \
@@ -451,7 +449,7 @@ stages:
       # ========================================================
       - job: Hadolint
         displayName: 'Hadolint (Dockerfile lint)'
-	condition: and(succeeded(), ne('${{ parameters.dockerfilePath }}', ''))
+        condition: and(succeeded(), ne('${{ parameters.dockerfilePath }}', ''))
         steps:
           - checkout: self
             displayName: 'Checkout repository'
